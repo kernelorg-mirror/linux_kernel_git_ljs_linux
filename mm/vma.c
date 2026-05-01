@@ -70,17 +70,6 @@ struct mmap_state {
 		.state = VMA_MERGE_START,				\
 	}
 
-/* Was this VMA ever forked from a parent, i.e. maybe contains CoW mappings? */
-static bool vma_is_fork_child(struct vm_area_struct *vma)
-{
-	/*
-	 * The list_is_singular() test is to avoid merging VMA cloned from
-	 * parents. This can improve scalability caused by the anon_vma root
-	 * lock.
-	 */
-	return vma && vma->anon_vma && !list_is_singular(&vma->anon_vma_chain);
-}
-
 static inline bool is_mergeable_vma(struct vma_merge_struct *vmg, bool merge_next)
 {
 	struct vm_area_struct *vma = merge_next ? vmg->next : vmg->prev;
@@ -101,6 +90,23 @@ static inline bool is_mergeable_vma(struct vma_merge_struct *vmg, bool merge_nex
 	if (!anon_vma_name_eq(anon_vma_name(vma), vmg->anon_name))
 		return false;
 	return true;
+}
+
+#ifdef CONFIG_COW_CONTEXT_ANON_RMAP
+static bool is_mergeable_anon_vma(struct vma_merge_struct *vmg, bool merge_next)
+{
+	return true;
+}
+#else
+/* Was this VMA ever forked from a parent, i.e. maybe contains CoW mappings? */
+static bool vma_is_fork_child(struct vm_area_struct *vma)
+{
+	/*
+	 * The list_is_singular() test is to avoid merging VMA cloned from
+	 * parents. This can improve scalability caused by the anon_vma root
+	 * lock.
+	 */
+	return vma && vma->anon_vma && !list_is_singular(&vma->anon_vma_chain);
 }
 
 static bool is_mergeable_anon_vma(struct vma_merge_struct *vmg, bool merge_next)
@@ -134,6 +140,7 @@ static bool is_mergeable_anon_vma(struct vma_merge_struct *vmg, bool merge_next)
 	/* Case 3 - the anon_vma's are already shared. */
 	return src_anon == tgt_anon;
 }
+#endif /* CONFIG_COW_CONTEXT_ANON_RMAP */
 
 /*
  * init_multi_vma_prep() - Initializer for struct vma_prepare
@@ -252,6 +259,17 @@ static void __remove_shared_vm_struct(struct vm_area_struct *vma,
 	flush_dcache_mmap_unlock(mapping);
 }
 
+#ifdef CONFIG_COW_CONTEXT_ANON_RMAP
+static void
+anon_vma_interval_tree_pre_update_vma(struct vm_area_struct *vma)
+{
+}
+
+static void
+anon_vma_interval_tree_post_update_vma(struct vm_area_struct *vma)
+{
+}
+#else
 /*
  * vma has some anon_vma assigned, and is already inserted on that
  * anon_vma's interval trees.
@@ -283,6 +301,7 @@ anon_vma_interval_tree_post_update_vma(struct vm_area_struct *vma)
 	list_for_each_entry(avc, &vma->anon_vma_chain, same_vma)
 		anon_vma_interval_tree_insert(avc, &avc->anon_vma->rb_root);
 }
+#endif /* !CONFIG_COW_CONTEXT_ANON_RMAP */
 
 /*
  * vma_prepare() - Helper function for handling locking VMAs prior to altering
@@ -429,6 +448,18 @@ static bool can_vma_merge_left(struct vma_merge_struct *vmg)
 		can_vma_merge_after(vmg);
 }
 
+#ifdef CONFIG_COW_CONTEXT_ANON_RMAP
+static bool can_vma_merge_right(struct vma_merge_struct *vmg,
+				bool can_merge_left)
+{
+	struct vm_area_struct *next = vmg->next;
+
+	if (!next || vmg->end != next->vm_start || !can_vma_merge_before(vmg))
+		return false;
+
+	return true;
+}
+#else
 /*
  * Can the proposed VMA be merged with the right (next) VMA taking into
  * account the end position of the proposed range.
@@ -459,6 +490,7 @@ static bool can_vma_merge_right(struct vma_merge_struct *vmg,
 	return !prev->anon_vma || !next->anon_vma ||
 		prev->anon_vma == next->anon_vma;
 }
+#endif /* !CONFIG_COW_CONTEXT_ANON_RMAP */
 
 /*
  * Close a vm structure and free it.
@@ -609,6 +641,13 @@ static int split_vma(struct vma_iterator *vmi, struct vm_area_struct *vma,
 	return __split_vma(vmi, vma, addr, new_below);
 }
 
+#ifdef CONFIG_COW_CONTEXT_ANON_RMAP
+static int dup_anon_vma(struct vm_area_struct *dst,
+			struct vm_area_struct *src, struct vm_area_struct **dup)
+{
+	return 0;
+}
+#else
 /*
  * dup_anon_vma() - Helper function to duplicate anon_vma on VMA merge in the
  * instance that the destination VMA has no anon_vma but the source does.
@@ -650,6 +689,7 @@ static int dup_anon_vma(struct vm_area_struct *dst,
 
 	return 0;
 }
+#endif /* !CONFIG_COW_CONTEXT_ANON_RMAP */
 
 #ifdef CONFIG_DEBUG_VM_MAPLE_TREE
 void validate_mm(struct mm_struct *mm)
@@ -661,7 +701,7 @@ void validate_mm(struct mm_struct *mm)
 
 	mt_validate(&mm->mm_mt);
 	for_each_vma(vmi, vma) {
-#ifdef CONFIG_DEBUG_VM_RB
+#if defined(CONFIG_DEBUG_VM_RB) && !defined(CONFIG_COW_CONTEXT_ANON_RMAP)
 		struct anon_vma *anon_vma = vma->anon_vma;
 		struct anon_vma_chain *avc;
 #endif
@@ -685,7 +725,7 @@ void validate_mm(struct mm_struct *mm)
 			vma_iter_dump_tree(&vmi);
 		}
 
-#ifdef CONFIG_DEBUG_VM_RB
+#if defined(CONFIG_DEBUG_VM_RB) && !defined(CONFIG_COW_CONTEXT_ANON_RMAP)
 		if (anon_vma) {
 			anon_vma_lock_read(anon_vma);
 			list_for_each_entry(avc, &vma->anon_vma_chain, same_vma)

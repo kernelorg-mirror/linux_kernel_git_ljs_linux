@@ -84,6 +84,49 @@
 #include "internal.h"
 #include "swap.h"
 
+#ifdef CONFIG_COW_CONTEXT_ANON_RMAP
+
+#define DUMMY_ANON_VMA ((struct anon_vma *)(1 << 4))
+
+int __anon_vma_prepare(struct vm_area_struct *vma)
+{
+	struct mm_struct *mm = vma->vm_mm;
+
+	mmap_assert_locked(mm);
+	might_sleep();
+
+	spin_lock(&mm->page_table_lock);
+	WRITE_ONCE(vma->anon_vma, DUMMY_ANON_VMA);
+	spin_unlock(&mm->page_table_lock);
+	cow_context_do_map_private_cow(vma);
+
+	return 0;
+}
+
+void __init anon_vma_init(void)
+{
+}
+
+int anon_vma_clone(struct vm_area_struct *dst, struct vm_area_struct *src,
+		   enum vma_operation operation)
+{
+	dst->anon_vma = src->anon_vma;
+
+	return 0;
+}
+
+void unlink_anon_vmas(struct vm_area_struct *vma)
+{
+	vma->anon_vma = NULL;
+}
+
+int anon_vma_fork(struct vm_area_struct *vma, struct vm_area_struct *pvma)
+{
+	vma->anon_vma = pvma->anon_vma;
+
+	return 0;
+}
+#else
 static struct kmem_cache *anon_vma_cachep;
 static struct kmem_cache *anon_vma_chain_cachep;
 
@@ -705,6 +748,7 @@ out:
 	rcu_read_unlock();
 	return anon_vma;
 }
+#endif /* !CONFIG_COW_CONTEXT_ANON_RMAP */
 
 #ifdef CONFIG_ARCH_WANT_BATCHED_UNMAP_TLB_FLUSH
 /*
@@ -1077,7 +1121,9 @@ int folio_referenced(struct folio *folio, int is_locked,
 	struct rmap_walk_control rwc = {
 		.rmap_one = folio_referenced_one,
 		.arg = (void *)&pra,
+#ifndef CONFIG_COW_CONTEXT_ANON_RMAP
 		.anon_lock = folio_lock_anon_vma_read,
+#endif
 		.try_lock = true,
 		.invalid_vma = invalid_folio_referenced_vma,
 	};
@@ -1442,6 +1488,41 @@ static void __folio_set_anon_cow(struct folio *folio,
 	folio_set_cow_context(folio, context);
 }
 
+#ifdef CONFIG_COW_CONTEXT_ANON_RMAP
+void folio_move_anon_rmap(struct folio *folio, struct vm_area_struct *vma)
+{
+	const void *mapping = (void *)FOLIO_MAPPING_ANON;
+	struct cow_context *folio_context = folio->cow_context;
+	const struct mm_struct *vma_mm = vma->vm_mm;
+	struct cow_context *vma_context = vma_mm->cow_context;
+	const struct mm_struct *folio_mm = folio_context->mm;
+
+	WRITE_ONCE(folio->mapping, (struct address_space *)mapping);
+
+	if (folio_mm == vma_mm)
+		return;
+	get_cow_context(vma_context);
+	WRITE_ONCE(folio->cow_context, vma_mm->cow_context);
+	put_cow_context(folio_context);
+}
+
+static void __page_check_anon_rmap(const struct folio *folio,
+		const struct page *page, struct vm_area_struct *vma,
+		unsigned long address)
+{
+}
+
+static void __folio_set_anon(struct folio *folio, struct vm_area_struct *vma,
+			     unsigned long address, bool exclusive)
+{
+	const void *mapping = (void *)FOLIO_MAPPING_ANON;
+
+	WRITE_ONCE(folio->mapping, (struct address_space *)mapping);
+	folio->index = linear_page_index(vma, address);
+
+	__folio_set_anon_cow(folio, vma);
+}
+#else
 /**
  * folio_move_anon_rmap - move a folio to our anon_vma
  * @folio:	The folio to move to our anon_vma
@@ -1537,6 +1618,7 @@ static void __page_check_anon_rmap(const struct folio *folio,
 	VM_BUG_ON_PAGE(page_pgoff(folio, page) != linear_page_index(vma, address),
 		       page);
 }
+#endif /* !CONFIG_COW_CONTEXT_ANON_RMAP */
 
 static __always_inline void __folio_add_anon_rmap(struct folio *folio,
 		struct page *page, int nr_pages, struct vm_area_struct *vma,
@@ -2420,7 +2502,9 @@ void try_to_unmap(struct folio *folio, enum ttu_flags flags)
 		.rmap_one = try_to_unmap_one,
 		.arg = (void *)flags,
 		.done = folio_not_mapped,
+#ifndef CONFIG_COW_CONTEXT_ANON_RMAP
 		.anon_lock = folio_lock_anon_vma_read,
+#endif
 	};
 
 	if (flags & TTU_RMAP_LOCKED)
@@ -2765,7 +2849,9 @@ void try_to_migrate(struct folio *folio, enum ttu_flags flags)
 		.rmap_one = try_to_migrate_one,
 		.arg = (void *)flags,
 		.done = folio_not_mapped,
+#ifndef CONFIG_COW_CONTEXT_ANON_RMAP
 		.anon_lock = folio_lock_anon_vma_read,
+#endif
 	};
 
 	/*
@@ -2933,6 +3019,13 @@ retry:
 EXPORT_SYMBOL_GPL(make_device_exclusive);
 #endif
 
+#ifdef CONFIG_COW_CONTEXT_ANON_RMAP
+static void rmap_walk_anon(struct folio *folio,
+		struct rmap_walk_control *rwc, bool locked)
+{
+	cow_context_walk(folio, rwc);
+}
+#else
 void __put_anon_vma(struct anon_vma *anon_vma)
 {
 	struct anon_vma *root = anon_vma->root;
@@ -3073,6 +3166,7 @@ static void rmap_walk_anon(struct folio *folio,
 	if (!locked)
 		anon_vma_unlock_read(anon_vma);
 }
+#endif /* !CONFIG_COW_CONTEXT_ANON_RMAP */
 
 /**
  * __rmap_walk_file() - Traverse the reverse mapping for a file-backed mapping

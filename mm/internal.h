@@ -203,13 +203,56 @@ void unmap_vmas(struct mmu_gather *tlb, struct unmap_desc *unmap);
 
 #ifdef CONFIG_MMU
 
+/* Operations which modify VMAs. */
+enum vma_operation {
+	VMA_OP_SPLIT,
+	VMA_OP_MERGE_UNFAULTED,
+	VMA_OP_REMAP,
+	VMA_OP_FORK,
+};
+
+int  __anon_vma_prepare(struct vm_area_struct *vma);
+#ifdef CONFIG_COW_CONTEXT_ANON_RMAP
+static inline void get_anon_vma(struct anon_vma *anon_vma)
+{
+}
+
+static inline void put_anon_vma(struct anon_vma *anon_vma)
+{
+}
+
+static inline void anon_vma_lock_write(struct anon_vma *anon_vma)
+{
+}
+
+static inline int anon_vma_trylock_write(struct anon_vma *anon_vma)
+{
+	return 0;
+}
+
+static inline void anon_vma_unlock_write(struct anon_vma *anon_vma)
+{
+}
+
+static inline void anon_vma_lock_read(struct anon_vma *anon_vma)
+{
+}
+
+static inline int anon_vma_trylock_read(struct anon_vma *anon_vma)
+{
+	return 0;
+}
+
+static inline void anon_vma_unlock_read(struct anon_vma *anon_vma)
+{
+}
+#else
 static inline void get_anon_vma(struct anon_vma *anon_vma)
 {
 	atomic_inc(&anon_vma->refcount);
 }
 
 void __put_anon_vma(struct anon_vma *anon_vma);
-
 static inline void put_anon_vma(struct anon_vma *anon_vma)
 {
 	if (atomic_dec_and_test(&anon_vma->refcount))
@@ -247,19 +290,11 @@ static inline void anon_vma_unlock_read(struct anon_vma *anon_vma)
 }
 
 struct anon_vma *folio_get_anon_vma(const struct folio *folio);
-
-/* Operations which modify VMAs. */
-enum vma_operation {
-	VMA_OP_SPLIT,
-	VMA_OP_MERGE_UNFAULTED,
-	VMA_OP_REMAP,
-	VMA_OP_FORK,
-};
+#endif /* !CONFIG_COW_CONTEXT_ANON_RMAP */
 
 int anon_vma_clone(struct vm_area_struct *dst, struct vm_area_struct *src,
 	enum vma_operation operation);
 int anon_vma_fork(struct vm_area_struct *vma, struct vm_area_struct *pvma);
-int  __anon_vma_prepare(struct vm_area_struct *vma);
 void unlink_anon_vmas(struct vm_area_struct *vma);
 
 static inline int anon_vma_prepare(struct vm_area_struct *vma)

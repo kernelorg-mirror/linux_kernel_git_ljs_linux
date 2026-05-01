@@ -961,15 +961,19 @@ struct rmap_walk_control {
 	bool (*rmap_one)(struct folio *folio, struct vm_area_struct *vma,
 					unsigned long addr, void *arg);
 	int (*done)(struct folio *folio);
+#ifndef CONFIG_COW_CONTEXT_ANON_RMAP
 	struct anon_vma *(*anon_lock)(const struct folio *folio,
 				      struct rmap_walk_control *rwc);
+#endif
 	bool (*invalid_vma)(struct vm_area_struct *vma, void *arg);
 };
 
 void rmap_walk(struct folio *folio, struct rmap_walk_control *rwc);
 void rmap_walk_locked(struct folio *folio, struct rmap_walk_control *rwc);
+#ifndef CONFIG_COW_CONTEXT_ANON_RMAP
 struct anon_vma *folio_lock_anon_vma_read(const struct folio *folio,
 					  struct rmap_walk_control *rwc);
+#endif
 
 void __put_cow_context(struct cow_context *context);
 static inline void get_cow_context(struct cow_context *context)

@@ -1283,6 +1283,7 @@ static int migrate_folio_unmap(new_folio_t get_new_folio,
 		folio_wait_writeback(src);
 	}
 
+#ifndef CONFIG_COW_CONTEXT_ANON_RMAP
 	/*
 	 * By try_to_migrate(), src->mapcount goes down to 0 here. In this case,
 	 * we cannot notice that anon_vma is freed while we migrate a page.
@@ -1299,6 +1300,7 @@ static int migrate_folio_unmap(new_folio_t get_new_folio,
 	 */
 	if (folio_test_anon(src) && !folio_test_ksm(src))
 		anon_vma = folio_get_anon_vma(src);
+#endif
 
 	/*
 	 * Block others from accessing the new page when we get around to
@@ -1335,9 +1337,11 @@ static int migrate_folio_unmap(new_folio_t get_new_folio,
 			goto out;
 		}
 	} else if (folio_mapped(src)) {
+#ifndef CONFIG_COW_CONTEXT_ANON_RMAP
 		/* Establish migration ptes */
 		VM_BUG_ON_FOLIO(folio_test_anon(src) &&
 			       !folio_test_ksm(src) && !anon_vma, src);
+#endif
 		try_to_migrate(src, mode == MIGRATE_ASYNC ? TTU_BATCH_FLUSH : 0);
 		old_page_state |= PAGE_WAS_MAPPED;
 	}
@@ -1523,8 +1527,10 @@ static int unmap_and_move_huge_page(new_folio_t get_new_folio,
 		goto out_unlock;
 	}
 
+#ifndef CONFIG_COW_CONTEXT_ANON_RMAP
 	if (folio_test_anon(src))
 		anon_vma = folio_get_anon_vma(src);
+#endif
 
 	if (unlikely(!folio_trylock(dst)))
 		goto put_anon;

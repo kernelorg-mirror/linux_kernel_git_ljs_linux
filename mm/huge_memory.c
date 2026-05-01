@@ -4084,6 +4084,7 @@ static int __folio_split(struct folio *folio, unsigned int new_order,
 	}
 
 	if (is_anon) {
+#ifndef CONFIG_COW_CONTEXT_ANON_RMAP
 		/*
 		 * The caller does not necessarily hold an mmap_lock that would
 		 * prevent the anon_vma disappearing so we first we take a
@@ -4098,6 +4099,7 @@ static int __folio_split(struct folio *folio, unsigned int new_order,
 			goto out;
 		}
 		anon_vma_lock_write(anon_vma);
+#endif
 		mapping = NULL;
 	} else {
 		unsigned int min_order;

@@ -539,6 +539,14 @@ struct task_struct *task_early_kill(struct task_struct *tsk, int force_early)
 	return find_early_kill_thread(tsk);
 }
 
+#ifdef CONFIG_COW_CONTEXT_ANON_RMAP
+static void collect_procs_anon(const struct folio *folio,
+		const struct page *page, struct list_head *to_kill,
+		int force_early)
+{
+	/* TODO... */
+}
+#else
 /*
  * Collect processes when the error hit an anonymous page.
  */
@@ -576,6 +584,7 @@ static void collect_procs_anon(const struct folio *folio,
 	rcu_read_unlock();
 	anon_vma_unlock_read(av);
 }
+#endif /* CONFIG_COW_CONTEXT_ANON_RMAP */
 
 /*
  * Collect processes when the error hit a file mapped page.

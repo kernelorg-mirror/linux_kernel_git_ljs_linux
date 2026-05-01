@@ -1470,6 +1470,13 @@ config LAZY_MMU_MODE_KUNIT_TEST
 
 	  If unsure, say N.
 
+menuconfig COW_CONTEXT_ANON_RMAP
+	bool "CoW context anon rmap"
+	depends on MMU
+	help
+	  Enable this option to use the cow_context anonymous reverse mapping
+	  rather than the legacy anon_vma approach.
+
 source "mm/damon/Kconfig"
 
 endmenu

@@ -1310,6 +1310,13 @@ static int copy_vma_and_data(struct vma_remap_struct *vrm,
 	return err;
 }
 
+#ifdef CONFIG_COW_CONTEXT_ANON_RMAP
+static void dontunmap_complete(struct vma_remap_struct *vrm,
+			       struct vm_area_struct *new_vma)
+{
+	vm_flags_clear(vrm->vma, VM_LOCKED_MASK);
+}
+#else
 /*
  * Perform final tasks for MADV_DONTUNMAP operation, clearing mlock() flag on
  * remaining VMA by convention (it cannot be mlock()'d any longer, as pages in
@@ -1336,6 +1343,7 @@ static void dontunmap_complete(struct vma_remap_struct *vrm,
 
 	/* Because we won't unmap we don't need to touch locked_vm. */
 }
+#endif /* !CONFIG_COW_CONTEXT_ANON_RMAP */
 
 static unsigned long move_vma(struct vma_remap_struct *vrm)
 {

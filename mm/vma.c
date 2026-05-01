@@ -470,6 +470,7 @@ void remove_vma(struct vm_area_struct *vma)
 	if (vma->vm_file)
 		fput(vma->vm_file);
 	mpol_put(vma_policy(vma));
+	cow_context_vma_unmap(vma);
 	vm_area_free(vma);
 }
 

@@ -985,6 +985,7 @@ static inline void put_cow_context(struct cow_context *context)
 void mm_init_cow_context(struct mm_struct *mm);
 void drop_cow_context(struct mm_struct *mm);
 void dup_cow_context(struct mm_struct *mm, struct mm_struct *oldmm);
+void cow_context_vma_unmap(struct vm_area_struct *vma);
 
 #else	/* !CONFIG_MMU */
 

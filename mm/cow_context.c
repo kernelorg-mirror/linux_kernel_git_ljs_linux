@@ -795,3 +795,18 @@ bool should_track_remap(struct vm_area_struct *vma)
 
 	return false;
 }
+
+void cow_context_vma_unmap(struct vm_area_struct *vma)
+{
+	const pgoff_t pgoff_moved = vma->vm_start >> PAGE_SHIFT;
+	struct mm_struct *mm = vma->vm_mm;
+	struct cow_context *context = mm->cow_context;
+	const unsigned long nr_pages = vma_pages(vma);
+	const pgoff_t pgoff = vma->vm_pgoff;
+	const long old_offset = pgoff_moved - pgoff;
+
+	if (!should_track_remap(vma))
+		return;
+
+	find_and_unmap_existing(context, pgoff, nr_pages, old_offset);
+}

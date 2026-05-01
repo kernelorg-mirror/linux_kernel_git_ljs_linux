@@ -2974,6 +2974,37 @@ out:
 	return anon_vma;
 }
 
+struct cow_context_check_state {
+	struct folio *folio;
+
+	int num_children_cow;
+	int num_children_anon;
+};
+
+static void count_anon_walk_anon(struct cow_context_check_state *state,
+				 struct folio *folio, struct vm_area_struct *vma,
+				 unsigned long address)
+{
+	DEFINE_FOLIO_VMA_WALK(pvmw, folio, vma, address, 0);
+
+	if (page_vma_mapped_walk(&pvmw)) {
+		state->num_children_anon++;
+		/*
+		 * Verify the cow_context tree can also find this mapping, at
+		 * the same PTE state.
+		 *
+		 * TODO: Eliminates races with concurrent copy_page_range()
+		 * which can map PTEs between separate walks, prevent this from
+		 * being a thing.
+		 */
+		rcu_read_lock();
+		if (cow_context_verify_vma(folio, vma))
+			state->num_children_cow++;
+		rcu_read_unlock();
+		page_vma_mapped_walk_done(&pvmw);
+	}
+}
+
 /*
  * rmap_walk_anon - do something to anonymous page using the object-based
  * rmap method
@@ -2990,6 +3021,9 @@ static void rmap_walk_anon(struct folio *folio,
 	struct anon_vma *anon_vma;
 	pgoff_t pgoff_start, pgoff_end;
 	struct anon_vma_chain *avc;
+	struct cow_context_check_state cow_state = {
+		.folio = folio,
+	};
 
 	/*
 	 * The folio lock ensures that folio->mapping can't be changed under us
@@ -3009,14 +3043,18 @@ static void rmap_walk_anon(struct folio *folio,
 
 	pgoff_start = folio_pgoff(folio);
 	pgoff_end = pgoff_start + folio_nr_pages(folio) - 1;
+
 	anon_vma_interval_tree_foreach(avc, &anon_vma->rb_root,
 			pgoff_start, pgoff_end) {
 		struct vm_area_struct *vma = avc->vma;
-		unsigned long address = vma_address(vma, pgoff_start,
-				folio_nr_pages(folio));
+		const unsigned long nr_pages = folio_nr_pages(folio);
+		const unsigned long address = vma_address(vma, pgoff_start,
+							  nr_pages);
 
 		VM_BUG_ON_VMA(address == -EFAULT, vma);
 		cond_resched();
+
+		count_anon_walk_anon(&cow_state, folio, vma, address);
 
 		if (rwc->invalid_vma && rwc->invalid_vma(vma, rwc->arg))
 			continue;
@@ -3026,6 +3064,11 @@ static void rmap_walk_anon(struct folio *folio,
 		if (rwc->done && rwc->done(folio))
 			break;
 	}
+
+	if (cow_state.num_children_cow != cow_state.num_children_anon)
+		pr_err("MISMATCH! cow=%d != anon=%d, pgoff=%lx\n",
+		       cow_state.num_children_cow, cow_state.num_children_anon,
+		       pgoff_start);
 
 	if (!locked)
 		anon_vma_unlock_read(anon_vma);

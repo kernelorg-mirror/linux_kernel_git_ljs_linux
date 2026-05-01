@@ -1098,3 +1098,45 @@ void cow_context_walk(struct folio *folio, struct rmap_walk_control *rwc)
 	traverse_contexts(folio->cow_context, walk_context, folio, &wcc);
 	rcu_read_unlock();
 }
+
+bool cow_context_verify_vma(struct folio *folio, struct vm_area_struct *vma)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	struct cow_context *context = mm->cow_context;
+	const pgoff_t pgoff = folio_pgoff(folio);
+	const pgoff_t pgoff_last = pgoff + folio_nr_pages(folio) - 1;
+	const pgoff_t pgoff_moved = vma->vm_start >> PAGE_SHIFT;
+	const long offset = (long)pgoff_moved - (long)vma->vm_pgoff;
+	MA_STATE(mas, &context->remap_mt, pgoff, pgoff_last);
+	remaps_entry_t remaps;
+	bool found = false;
+	long curr_offset;
+	int i;
+
+	lockdep_assert_in_rcu_read_lock();
+
+	if (!folio->cow_context)
+		return false;
+
+	/* Can the VMA's CoW context be reached by the folio's? */
+	for (; context; context = context->parent) {
+		if (context != folio->cow_context)
+			continue;
+
+		found = true;
+		break;
+	}
+	if (!found)
+		return false;
+
+	/* Non-remapped case. */
+	if (!offset)
+		return true;
+
+	/* If remapped, then make sure we have the correct remap. */
+	remaps_for_each(i, &mas, remaps, curr_offset, pgoff_last)
+		if (curr_offset == offset)
+			return true;
+
+	return false;
+}

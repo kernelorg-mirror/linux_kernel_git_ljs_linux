@@ -997,6 +997,8 @@ void cow_context_walk(struct folio *folio, struct rmap_walk_control *rwc);
 void cow_context_vma_adjust(struct vm_area_struct *vma, unsigned long start,
 			    unsigned long end);
 
+bool cow_context_verify_vma(struct folio *folio, struct vm_area_struct *vma);
+
 #else	/* !CONFIG_MMU */
 
 #define anon_vma_init()		do {} while (0)

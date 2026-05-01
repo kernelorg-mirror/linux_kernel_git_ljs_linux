@@ -710,6 +710,18 @@ static struct cow_context *delete_child_from_parent(struct cow_context *context)
 	return parent;
 }
 
+static void delete_remaps(struct cow_context *context)
+{
+	MA_STATE(mas_remaps, &context->remap_mt, 0, 0);
+	remaps_entry_t remaps;
+
+	/* By now nothing references the remaps so we're safe to do this. */
+	remaps_for_each_entry(&mas_remaps, remaps, UINT_MAX)
+		free_remaps(remaps);
+
+	mtree_destroy(&context->remap_mt);
+}
+
 void __put_cow_context(struct cow_context *context)
 {
 	struct cow_context *curr, *parent;
@@ -717,7 +729,13 @@ void __put_cow_context(struct cow_context *context)
 	/* Iteratively cascade to parents. */
 	for (curr = context; curr; curr = parent) {
 		VM_WARN_ON_ONCE(!list_empty(&context->children));
+
 		parent = delete_child_from_parent(curr);
+
+		rcu_read_lock();
+		delete_remaps(curr);
+		rcu_read_unlock();
+
 		kfree_rcu(curr, rcu);
 	}
 }

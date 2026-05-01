@@ -2984,6 +2984,18 @@ static inline void *folio_address(const struct folio *folio)
 	return page_address(&folio->page);
 }
 
+static inline struct cow_context *folio_cow_context(struct folio *folio)
+{
+	/* TODO: store in folio->mapping :) */
+	return READ_ONCE(folio->cow_context);
+}
+
+static inline void folio_set_cow_context(struct folio *folio,
+					 struct cow_context context)
+{
+	WRITE_ONCE(folio->cow_context, context);
+}
+
 /*
  * Return true only if the page has been allocated with
  * ALLOC_NO_WATERMARKS and the low watermark was not

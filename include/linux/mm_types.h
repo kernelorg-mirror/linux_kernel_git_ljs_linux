@@ -219,6 +219,7 @@ struct page {
 	struct page *kmsan_shadow;
 	struct page *kmsan_origin;
 #endif
+	unsigned long cow_padding[1];
 } _struct_page_alignment;
 
 /*
@@ -440,6 +441,8 @@ struct folio {
 #ifdef LAST_CPUPID_NOT_IN_PAGE_FLAGS
 			int _last_cpupid;
 #endif
+			struct cow_context *cow_context;
+
 	/* private: the union with struct page is transitional */
 		};
 		struct page page;
@@ -473,6 +476,7 @@ struct folio {
 			unsigned int _nr_pages;
 #endif /* NR_PAGES_IN_LARGE_FOLIO */
 	/* private: the union with struct page is transitional */
+			unsigned long cow_padding[1];
 		};
 		struct page __page_1;
 	};

@@ -126,6 +126,8 @@ void find_and_unmap_existing(struct cow_context *context, pgoff_t pgoff,
 void add_new_remap(struct cow_context *context, pgoff_t pgoff,
 		   unsigned long nr_pages, long new_offset, gfp_t gfp);
 
+bool should_track_remap(struct vm_area_struct *vma);
+
 static int __dynarray_nr(struct dynarray *arr)
 {
 	return READ_ONCE(arr->nr);
@@ -754,4 +756,42 @@ void mm_init_cow_context(struct mm_struct *mm)
 	spin_lock_init(&context->list_write_lock);
 	spin_lock_init(&context->concurrent_unmap_lock);
 	mm->cow_context = context;
+}
+
+static bool should_track_anon_remap(struct vm_area_struct *vma)
+{
+	const pgoff_t pgoff_moved = vma->vm_start >> PAGE_SHIFT;
+	const pgoff_t pgoff = vma->vm_pgoff;
+
+	if (!vma_is_anonymous(vma))
+		return false;
+	if (!vma->anon_vma)
+		return false;
+
+	return pgoff != pgoff_moved;
+}
+
+static bool should_track_map_private_remap(struct vm_area_struct *vma)
+{
+	const pgoff_t pgoff_moved = vma->vm_start >> PAGE_SHIFT;
+	const pgoff_t pgoff = vma->vm_pgoff;
+
+	if (vma_is_anonymous(vma))
+		return false;
+	if (vma_flags_test_any(&vma->flags, VMA_SHARED_BIT, VMA_MAYSHARE_BIT))
+		return false;
+	if (!vma->anon_vma)
+		return false;
+
+	return pgoff != pgoff_moved;
+}
+
+bool should_track_remap(struct vm_area_struct *vma)
+{
+	if (should_track_anon_remap(vma))
+		return true;
+	if (should_track_map_private_remap(vma))
+		return true;
+
+	return false;
 }

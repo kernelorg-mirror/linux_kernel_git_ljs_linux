@@ -19,6 +19,15 @@
 
 const struct vm_operations_struct vma_dummy_vm_ops;
 
+struct cow_context init_cow_context = {
+	.refcnt = REFCOUNT_INIT(1),
+	.mm = &init_mm,
+	.remap_mt = MTREE_INIT(remap_mt, MM_MT_FLAGS),
+	.children = LIST_HEAD_INIT(init_cow_context.children),
+	.siblings = LIST_HEAD_INIT(init_cow_context.siblings),
+	.list_write_lock = __SPIN_LOCK_UNLOCKED(init_cow_context.list_write_lock),
+};
+
 /*
  * For dynamically allocated mm_structs, there is a dynamically sized cpumask
  * at the end of the structure, the size of which depends on the maximum CPU
@@ -48,6 +57,7 @@ struct mm_struct init_mm = {
 	.mm_cid.lock = __RAW_SPIN_LOCK_UNLOCKED(init_mm.mm_cid.lock),
 #endif
 	.flexible_array	= MM_STRUCT_FLEXIBLE_ARRAY_INIT,
+	.cow_context = &init_cow_context,
 	INIT_MM_CONTEXT(init_mm)
 };
 

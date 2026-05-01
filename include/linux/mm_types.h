@@ -1167,6 +1167,17 @@ typedef struct {
 	DECLARE_BITMAP(__mm_flags, NUM_MM_FLAG_BITS);
 } __private mm_flags_t;
 
+struct cow_context {
+	refcount_t refcnt;		/* 1 ref for mm, 1 ref per child. */
+	struct mm_struct *mm;
+	struct maple_tree remap_mt;
+	struct cow_context *parent;
+	struct list_head __rcu children;
+	struct list_head __rcu siblings;
+	struct rcu_head rcu;
+	spinlock_t list_write_lock;	/* Protects children. */
+};
+
 struct kioctx_table;
 struct iommu_mm_data;
 struct mm_struct {
@@ -1424,6 +1435,7 @@ struct mm_struct {
 #ifdef CONFIG_MM_ID
 		mm_id_t mm_id;
 #endif /* CONFIG_MM_ID */
+		struct cow_context *cow_context;
 	} __randomize_layout;
 
 	/*
@@ -1466,6 +1478,7 @@ static inline void __mm_flags_set_mask_bits_word(struct mm_struct *mm,
 #define MM_MT_FLAGS	(MT_FLAGS_ALLOC_RANGE | MT_FLAGS_LOCK_EXTERN | \
 			 MT_FLAGS_USE_RCU)
 extern struct mm_struct init_mm;
+extern struct cow_context init_cow_context;
 
 #define MM_STRUCT_FLEXIBLE_ARRAY_INIT				\
 {								\

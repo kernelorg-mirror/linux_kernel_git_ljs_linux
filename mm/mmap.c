@@ -1800,8 +1800,10 @@ __latent_entropy int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 			 * copy page for current vma.
 			 */
 			tmp->anon_vma = NULL;
-		} else if (anon_vma_fork(tmp, mpnt))
-			goto fail_nomem_anon_vma_fork;
+		} else {
+			if (anon_vma_fork(tmp, mpnt))
+				goto fail_nomem_anon_vma_fork;
+		}
 		vm_flags_clear(tmp, VM_LOCKED_MASK);
 		/*
 		 * Copy/update hugetlb private vma information.
@@ -1852,6 +1854,7 @@ loop_out:
 		mt_set_in_rcu(vmi.mas.tree);
 		ksm_fork(mm, oldmm);
 		khugepaged_fork(mm, oldmm);
+		dup_cow_context(mm, oldmm);
 	} else {
 		unsigned long end;
 

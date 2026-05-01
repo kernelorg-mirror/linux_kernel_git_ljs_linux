@@ -374,6 +374,7 @@ static __always_inline void __folio_rmap_sanity_checks(const struct folio *folio
 		BUILD_BUG();
 	}
 
+#ifndef CONFIG_COW_CONTEXT_ANON_RMAP
 	/*
 	 * Anon folios must have an associated live anon_vma as long as they're
 	 * mapped into userspace.
@@ -395,6 +396,7 @@ static __always_inline void __folio_rmap_sanity_checks(const struct folio *folio
 		anon_vma = (void *)(mapping - FOLIO_MAPPING_ANON);
 		VM_WARN_ON_FOLIO(atomic_read(&anon_vma->refcount) == 0, folio);
 	}
+#endif
 }
 
 /*
@@ -969,6 +971,21 @@ void rmap_walk_locked(struct folio *folio, struct rmap_walk_control *rwc);
 struct anon_vma *folio_lock_anon_vma_read(const struct folio *folio,
 					  struct rmap_walk_control *rwc);
 
+void __put_cow_context(struct cow_context *context);
+static inline void get_cow_context(struct cow_context *context)
+{
+	refcount_inc(&context->refcnt);
+}
+static inline void put_cow_context(struct cow_context *context)
+{
+	if (refcount_dec_and_test(&context->refcnt))
+		__put_cow_context(context);
+}
+
+void mm_init_cow_context(struct mm_struct *mm);
+void drop_cow_context(struct mm_struct *mm);
+void dup_cow_context(struct mm_struct *mm, struct mm_struct *oldmm);
+
 #else	/* !CONFIG_MMU */
 
 #define anon_vma_init()		do {} while (0)
@@ -990,6 +1007,6 @@ static inline int folio_mkclean(struct folio *folio)
 {
 	return 0;
 }
-#endif	/* CONFIG_MMU */
 
+#endif	/* CONFIG_MMU */
 #endif	/* _LINUX_RMAP_H */

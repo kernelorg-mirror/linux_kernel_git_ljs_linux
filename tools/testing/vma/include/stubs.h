@@ -432,3 +432,16 @@ static inline bool vma_supports_mlock(const struct vm_area_struct *vma)
 {
 	return false;
 }
+
+static inline void cow_context_vma_unmap(struct vm_area_struct *vma)
+{
+}
+
+static inline void cow_context_vma_adjust(struct vm_area_struct *vma, unsigned long start,
+					  unsigned long end)
+{
+}
+
+static inline void cow_context_do_remap(struct vm_area_struct *vma, unsigned long orig_addr)
+{
+}

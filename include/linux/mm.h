@@ -2991,7 +2991,7 @@ static inline struct cow_context *folio_cow_context(struct folio *folio)
 }
 
 static inline void folio_set_cow_context(struct folio *folio,
-					 struct cow_context context)
+					 struct cow_context *context)
 {
 	WRITE_ONCE(folio->cow_context, context);
 }

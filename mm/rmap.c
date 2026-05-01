@@ -1428,6 +1428,15 @@ static __always_inline void __folio_add_rmap(struct folio *folio,
 	__folio_mod_stat(folio, nr, nr_pmdmapped);
 }
 
+static void __folio_set_anon_cow(struct folio *folio,
+				 struct vm_area_struct *vma)
+{
+	struct cow_context *context = vma->vm_mm->cow_context;
+
+	get_cow_context(context);
+	folio_set_cow_context(folio, context);
+}
+
 /**
  * folio_move_anon_rmap - move a folio to our anon_vma
  * @folio:	The folio to move to our anon_vma
@@ -1439,6 +1448,8 @@ static __always_inline void __folio_add_rmap(struct folio *folio,
  */
 void folio_move_anon_rmap(struct folio *folio, struct vm_area_struct *vma)
 {
+	struct cow_context *new_context = vma->vm_mm->cow_context;
+	struct cow_context *old_context = folio_cow_context(folio);
 	void *anon_vma = vma->anon_vma;
 
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
@@ -1451,6 +1462,13 @@ void folio_move_anon_rmap(struct folio *folio, struct vm_area_struct *vma)
 	 * folio_test_anon()) will not see one without the other.
 	 */
 	WRITE_ONCE(folio->mapping, anon_vma);
+
+	if (old_context == new_context)
+		return;
+
+	get_cow_context(new_context);
+	folio_set_cow_context(folio, new_context);
+	put_cow_context(old_context);
 }
 
 /**
@@ -1483,6 +1501,8 @@ static void __folio_set_anon(struct folio *folio, struct vm_area_struct *vma,
 	anon_vma = (void *) anon_vma + FOLIO_MAPPING_ANON;
 	WRITE_ONCE(folio->mapping, (struct address_space *) anon_vma);
 	folio->index = linear_page_index(vma, address);
+
+	__folio_set_anon_cow(folio, vma);
 }
 
 /**

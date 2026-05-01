@@ -1707,6 +1707,7 @@ void free_huge_folio(struct folio *folio)
 	struct hstate *h = folio_hstate(folio);
 	int nid = folio_nid(folio);
 	struct hugepage_subpool *spool = hugetlb_folio_subpool(folio);
+	struct cow_context *context = folio_cow_context(folio);
 	bool restore_reserve;
 	unsigned long flags;
 
@@ -1716,6 +1717,10 @@ void free_huge_folio(struct folio *folio)
 	hugetlb_set_folio_subpool(folio, NULL);
 	if (folio_test_anon(folio))
 		__ClearPageAnonExclusive(&folio->page);
+	if (context) {
+		put_cow_context(context);
+		folio_set_cow_context(folio, NULL);
+	}
 	folio->mapping = NULL;
 	restore_reserve = folio_test_hugetlb_restore_reserve(folio);
 	folio_clear_hugetlb_restore_reserve(folio);

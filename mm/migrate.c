@@ -576,6 +576,9 @@ static int __folio_migrate_mapping(struct address_space *mapping,
 	struct zone *oldzone, *newzone;
 	int dirty;
 	long nr = folio_nr_pages(folio);
+	struct cow_context *context = folio_cow_context(folio);
+
+	folio_set_cow_context(newfolio, context);
 
 	if (!mapping) {
 		/* Take off deferred split queue while frozen and memcg set */
@@ -590,6 +593,10 @@ static int __folio_migrate_mapping(struct address_space *mapping,
 		/* No turning back from here */
 		newfolio->index = folio->index;
 		newfolio->mapping = folio->mapping;
+
+		if (context)
+			get_cow_context(context);
+
 		if (folio_test_anon(folio) && folio_test_large(folio))
 			mod_mthp_stat(folio_order(folio), MTHP_STAT_NR_ANON, 1);
 		if (folio_test_swapbacked(folio))
@@ -621,6 +628,10 @@ static int __folio_migrate_mapping(struct address_space *mapping,
 	 * Now we know that no one else is looking at the folio:
 	 * no turning back from here.
 	 */
+
+	if (context)
+		get_cow_context(context);
+
 	newfolio->index = folio->index;
 	newfolio->mapping = folio->mapping;
 	if (folio_test_anon(folio) && folio_test_large(folio))

@@ -3587,6 +3587,7 @@ static void __split_folio_to_order(struct folio *folio, int old_order,
 {
 	/* Scan poisoned pages when split a poisoned folio to large folios */
 	const bool handle_hwpoison = folio_test_has_hwpoisoned(folio) && new_order;
+	struct cow_context *context = folio_cow_context(folio);
 	long new_nr_pages = 1 << new_order;
 	long nr_pages = 1 << old_order;
 	long i;
@@ -3650,6 +3651,10 @@ static void __split_folio_to_order(struct folio *folio, int old_order,
 
 		new_folio->mapping = folio->mapping;
 		new_folio->index = folio->index + i;
+		if (context) {
+			get_cow_context(context);
+			folio_set_cow_context(new_folio, context);
+		}
 
 		if (folio_test_swapcache(folio))
 			new_folio->swap.val = folio->swap.val + i;

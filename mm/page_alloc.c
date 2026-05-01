@@ -1374,8 +1374,15 @@ __always_inline bool __free_pages_prepare(struct page *page,
 		}
 	}
 	if (folio_test_anon(folio)) {
+		struct cow_context *context = folio_cow_context(folio);
+
 		mod_mthp_stat(order, MTHP_STAT_NR_ANON, -1);
 		folio->mapping = NULL;
+
+		if (context) {
+			folio_set_cow_context(folio, NULL);
+			put_cow_context(context);
+		}
 	}
 	if (unlikely(page_has_type(page))) {
 		/* networking expects to clear its page type before releasing */

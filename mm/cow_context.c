@@ -828,3 +828,44 @@ void cow_context_vma_unmap(struct vm_area_struct *vma)
 
 	find_and_unmap_existing(context, pgoff, nr_pages, old_offset);
 }
+
+/* vma is _after_ the remap. */
+static void __cow_context_do_remap(struct vm_area_struct *vma, long pgoff_orig,
+				   bool is_remap)
+{
+	const pgoff_t pgoff = vma->vm_pgoff;
+	const pgoff_t pgoff_moved = vma->vm_start >> PAGE_SHIFT;
+	const unsigned long nr_pages = vma_pages(vma);
+	const long old_offset = pgoff_orig - pgoff;
+	const long new_offset = pgoff_moved - pgoff;
+	struct mm_struct *mm = vma->vm_mm;
+	struct cow_context *context = mm->cow_context;
+
+	/* We need the exclusive write lock to avoid races on the dynarray. */
+	mmap_assert_write_locked(mm);
+
+	if (!should_track_remap(vma))
+		return;
+	if (!old_offset && !new_offset)
+		return;
+	if (!new_offset) {
+		find_and_unmap_existing(context, pgoff, nr_pages, old_offset);
+		return;
+	}
+
+	/* If we're not forking, we might only need to update remaps. */
+	if (is_remap && find_and_remap_existing(context, pgoff, nr_pages,
+						old_offset, new_offset))
+		return;
+	add_new_remap(context, pgoff, nr_pages, new_offset, GFP_KERNEL);
+}
+
+void cow_context_do_remap(struct vm_area_struct *vma, unsigned long orig_addr)
+{
+	__cow_context_do_remap(vma, orig_addr >> PAGE_SHIFT, /*is_remap=*/true);
+}
+
+void cow_context_do_fork(struct vm_area_struct *vma, struct vm_area_struct *pvma)
+{
+	__cow_context_do_remap(vma, vma->vm_start >> PAGE_SHIFT, /*is_remap=*/false);
+}

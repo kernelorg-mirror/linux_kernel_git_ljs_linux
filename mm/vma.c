@@ -1937,6 +1937,9 @@ struct vm_area_struct *copy_vma(struct vm_area_struct **vmap,
 		if (vma_link(mm, new_vma))
 			goto out_vma_link;
 		*need_rmap_locks = false;
+
+		if (faulted_in_anon_vma)
+			cow_context_do_remap(new_vma, vma->vm_start);
 	}
 	return new_vma;
 

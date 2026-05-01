@@ -1801,6 +1801,8 @@ __latent_entropy int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 			 */
 			tmp->anon_vma = NULL;
 		} else {
+			/* TODO: Error path undo... here and elsewhere? */
+			cow_context_do_fork(tmp, mpnt);
 			if (anon_vma_fork(tmp, mpnt))
 				goto fail_nomem_anon_vma_fork;
 		}

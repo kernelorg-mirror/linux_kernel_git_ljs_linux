@@ -1179,7 +1179,8 @@ struct cow_context {
 	struct list_head __rcu children;
 	struct list_head __rcu siblings;
 	struct rcu_head rcu;
-	spinlock_t list_write_lock;	/* Protects children. */
+	spinlock_t list_write_lock;	  /* Protects children. */
+	spinlock_t concurrent_unmap_lock; /* HACK: mmap_downgrade() is painful. */
 };
 
 struct kioctx_table;

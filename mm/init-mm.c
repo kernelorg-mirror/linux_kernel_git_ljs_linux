@@ -26,6 +26,8 @@ struct cow_context init_cow_context = {
 	.children = LIST_HEAD_INIT(init_cow_context.children),
 	.siblings = LIST_HEAD_INIT(init_cow_context.siblings),
 	.list_write_lock = __SPIN_LOCK_UNLOCKED(init_cow_context.list_write_lock),
+	.concurrent_unmap_lock =
+		__SPIN_LOCK_UNLOCKED(init_cow_context.concurrent_unmap_lock),
 };
 
 /*

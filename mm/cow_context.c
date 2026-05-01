@@ -38,7 +38,7 @@ struct dynarray *dynarray_dup(struct dynarray *arr, gfp_t gfp);
 struct dynarray *__dynarray_append(struct dynarray *arr, void *val, gfp_t gfp);
 struct dynarray *__dynarray_append_stack(struct dynarray *arr,
 					 void *val, gfp_t gfp);
-void dynarray_shrink_rcu(struct dynarray *arr);
+void dynarray_shrink(struct dynarray *arr);
 
 #define EMPTY_DYNARRAY ((struct dynarray) {})
 
@@ -117,6 +117,14 @@ void store_new_remaps_entry(struct ma_state *mas_remaps, pgoff_t pgoff,
 			    pgoff_t pgoff_last, remaps_entry_t remaps);
 void store_new_simple_remap(struct ma_state *mas_remaps, pgoff_t pgoff,
 			    pgoff_t pgoff_last, long new_offset);
+
+bool find_and_remap_existing(struct cow_context *context,
+			     pgoff_t pgoff, unsigned long nr_pages,
+			     long old_offset, long new_offset);
+void find_and_unmap_existing(struct cow_context *context, pgoff_t pgoff,
+			     unsigned long nr_pages, long old_offset);
+void add_new_remap(struct cow_context *context, pgoff_t pgoff,
+		   unsigned long nr_pages, long new_offset, gfp_t gfp);
 
 static int __dynarray_nr(struct dynarray *arr)
 {
@@ -260,15 +268,14 @@ static void dynarray_free_rcu(struct dynarray *arr)
 	kfree_rcu_mightsleep(arr);
 }
 
-void dynarray_shrink_rcu(struct dynarray *arr)
+void dynarray_shrink(struct dynarray *arr)
 {
 	const int nr = __dynarray_nr(arr);
 
+	VM_WARN_ON_ONCE(nr == 1);
+
 	/* We are the exclusive writer so no chance of a tear. */
-	if (nr == 1) {
-		dynarray_set_nr(arr, 0);
-		dynarray_free_rcu(arr);
-	}
+	dynarray_set_nr(arr, nr - 1);
 }
 
 remaps_entry_t mk_stack_multi_remaps(struct dynarray *stack_multi)
@@ -384,6 +391,302 @@ void store_new_simple_remap(struct ma_state *mas_remaps, pgoff_t pgoff,
 	store_new_remaps_entry(mas_remaps, pgoff, pgoff_last, remaps);
 }
 
+/*
+ * Reduce the count of remaps by 1, freeing the entry in the remaps maple tree
+ * if reduced to zero.
+ *
+ * RCU read lock must be held.
+ */
+static void shrink_remaps(struct cow_context *context,
+			  struct ma_state *mas_remaps, pgoff_t pgoff,
+			  pgoff_t pgoff_last, remaps_entry_t remaps)
+{
+	int nr;
+	remaps_entry_t new_remaps;
+	pgoff_t pgoff_next;
+
+	lockdep_assert_in_rcu_read_lock();
+
+	/* mmap_downgrade() makes life hard. */
+	spin_lock(&context->concurrent_unmap_lock);
+
+	nr = nr_remaps(remaps);
+
+	/* If multi, simple. */
+	if (nr > 2) {
+		dynarray_shrink(get_multi_remaps(remaps));
+		spin_unlock(&context->concurrent_unmap_lock);
+		return;
+	}
+
+	if (nr == 2)
+		new_remaps = mk_simple_remap(get_remap(remaps, 0));
+	else /* nr == 1 */
+		new_remaps = EMPTY_REMAPS_ENTRY;
+
+	pgoff_next = mas_remaps->last + 1;
+
+	spin_unlock(&context->concurrent_unmap_lock);
+	/* Now we're allocating so must drop the lock. RCU readers are safe. */
+	rcu_read_unlock();
+	store_new_remaps_entry(mas_remaps, pgoff, pgoff_last, new_remaps);
+	free_remaps(remaps);
+	mas_set(mas_remaps, pgoff_next);
+	rcu_read_lock();
+}
+
+static remaps_entry_t append_remap_offset(remaps_entry_t remaps,
+					  long new_offset, gfp_t gfp)
+{
+	remaps_entry_t ret;
+
+	if (is_empty_remaps(remaps))
+		return mk_simple_remap(new_offset);
+
+	if (is_simple_remap_entry(remaps)) {
+		DECLARE_STACK_DYNARRAY_SIMPLE_REMAP(arr, remaps);
+
+		/*
+		 * We declare on the stack as a cheap way of expanding ->
+		 * allocated :)
+		 */
+		ret.multi = __dynarray_append_stack(arr, (void *)new_offset, gfp);
+	} else if (is_remap_entry_on_stack(remaps)) {
+		struct dynarray *arr, *new;
+
+		arr = get_multi_remaps(remaps);
+		new = __dynarray_append_stack(arr, (void *)new_offset, gfp);
+		ret.multi = new;
+		if (arr == new)
+			ret.raw |= REMAP_IS_ON_STACK;
+	} else {
+		struct dynarray *arr = get_multi_remaps(remaps);
+
+		ret.multi = __dynarray_append(arr, (void *)new_offset, gfp);
+	}
+
+	return ret;
+}
+
+static remaps_entry_t dup_remaps(remaps_entry_t remaps, gfp_t gfp)
+{
+	remaps_entry_t ret;
+
+	if (is_empty_remaps(remaps) || is_simple_remap_entry(remaps))
+		ret = remaps;
+	else
+		ret.multi = dynarray_dup(remaps.multi, gfp);
+	return ret;
+}
+
+static remaps_entry_t get_remaps(struct ma_state *mas_remaps)
+{
+	remaps_entry_t ret;
+
+	rcu_read_lock();
+	ret.entry = mas_walk(mas_remaps);
+	rcu_read_unlock();
+
+	return ret;
+}
+
+static void split_remap(struct cow_context *context, pgoff_t pgoff,
+			pgoff_t pgoff_split, long new_offset, gfp_t gfp)
+{
+	MA_STATE(mas_remaps, &context->remap_mt, pgoff, pgoff);
+	remaps_entry_t remaps, dup;
+
+	remaps = get_remaps(&mas_remaps);
+	VM_WARN_ON_ONCE(is_empty_remaps(remaps));
+
+	/* Non-overlapping portion. */
+	dup = dup_remaps(remaps, gfp);
+	VM_WARN_ON_ONCE(pgoff_split == pgoff);
+	if (pgoff_split < pgoff) {
+		VM_WARN_ON_ONCE(mas_remaps.index != pgoff_split);
+		mas_set_range(&mas_remaps, pgoff_split, pgoff -1);
+		mas_lock(&mas_remaps);
+		mas_store_gfp(&mas_remaps, dup.entry, gfp);
+		mas_unlock(&mas_remaps);
+	} else {
+		/* Split after. */
+		VM_WARN_ON_ONCE(mas_remaps.last != pgoff_split);
+		mas_set_range(&mas_remaps, pgoff + 1, pgoff_split);
+		mas_lock(&mas_remaps);
+		mas_store_gfp(&mas_remaps, dup.entry, gfp);
+		mas_unlock(&mas_remaps);
+	}
+}
+
+/*
+ * When remapping, there are two possibilities:
+ *
+ * 1. No existing remap exists for this pgoff mapping to old_offset.
+ * 2. >=1 remap for this pgoff exists (possibly split due to other remaps).
+ *
+ * Returns true if we found existing remaps and updated them, or false
+ * otherwise.
+ */
+bool find_and_remap_existing(struct cow_context *context,
+			     pgoff_t pgoff, unsigned long nr_pages,
+			     long old_offset, long new_offset)
+{
+	const pgoff_t pgoff_last = pgoff + nr_pages - 1;
+	MA_STATE(mas_remaps, &context->remap_mt, pgoff, pgoff_last);
+	remaps_entry_t remaps;
+	bool found = false;
+	long curr_offset;
+	int i;
+
+	mmap_assert_write_locked(context->mm);
+
+	remaps_for_each(i, &mas_remaps, remaps, curr_offset, pgoff_last) {
+		if (curr_offset != old_offset)
+			continue;
+
+		found = true;
+		if (is_simple_remap_entry(remaps))
+			store_new_simple_remap(&mas_remaps, mas_remaps.index,
+					       mas_remaps.last, new_offset);
+		else
+			set_multi_remap(remaps, i, new_offset);
+	}
+
+	return found;
+}
+
+void find_and_unmap_existing(struct cow_context *context, pgoff_t pgoff,
+			     unsigned long nr_pages, long old_offset)
+{
+	const pgoff_t pgoff_last = pgoff + nr_pages - 1;
+	MA_STATE(mas_remaps, &context->remap_mt, pgoff, pgoff_last);
+	remaps_entry_t remaps;
+	long curr_offset;
+	int i;
+
+	rcu_read_lock();
+	remaps_for_each_entry(&mas_remaps, remaps, pgoff_last) {
+		bool unmapping = false;
+
+		remaps_for_each_entry_offset(i, remaps, curr_offset) {
+			if (unmapping) {
+				/* Here i must be >1 so we know it's multi. */
+				VM_WARN_ON_ONCE(is_simple_remap_entry(remaps));
+				set_multi_remap(remaps, i - 1, curr_offset);
+			} else if (curr_offset == old_offset) {
+				unmapping = true;
+			}
+		}
+
+		if (unmapping)
+			shrink_remaps(context, &mas_remaps, mas_remaps.index,
+				      mas_remaps.last, remaps);
+	}
+	rcu_read_unlock();
+}
+
+/*
+ * Iterate through [pgoff, pgoff_last], filling in any gaps and
+ * appending to any existing entries.
+ */
+static void add_overlapping_remap(struct ma_state *mas_remaps,
+				  pgoff_t pgoff, pgoff_t pgoff_last,
+				  long new_offset)
+{
+	pgoff_t pgoff_prev = pgoff;
+	remaps_entry_t remaps;
+
+	mas_set_range(mas_remaps, pgoff, pgoff_last);
+	remaps_for_each_entry(mas_remaps, remaps, pgoff_last) {
+		const pgoff_t pgoff_left = mas_remaps->index;
+		const pgoff_t pgoff_right = mas_remaps->last;
+		remaps_entry_t new_remaps;
+
+		/*
+		 * Fill in a gap if it exists:
+		 *
+		 * |--------|.     Gap      |-----------|
+		 * |        |<------------->|           |
+		 * |--------|.              |-----------|
+		 *      pgoff_prev      pgoff_left  pgoff_right
+		 */
+		if (pgoff_left > pgoff_prev)
+			store_new_simple_remap(mas_remaps, pgoff_prev,
+					       pgoff_left - 1, new_offset);
+
+		/*
+		 * Append new offset to existing entry:
+		 *
+		 *                         |-----------|
+		 *                         |           |
+		 *                         |-----------|
+		 *                    pgoff_left  pgoff_right
+		 */
+		new_remaps = append_remap_offset(remaps, new_offset, GFP_KERNEL);
+		if (!same_remaps(new_remaps, remaps))
+			store_new_remaps_entry(mas_remaps, pgoff_left, pgoff_right,
+					       new_remaps);
+
+		pgoff_prev = pgoff_right + 1;
+		mas_set(mas_remaps, pgoff_prev);
+	}
+
+	/* Trailing gap. */
+	if (pgoff_prev <= pgoff_last)
+		store_new_simple_remap(mas_remaps, pgoff_prev, pgoff_last,
+				       new_offset);
+}
+
+void add_new_remap(struct cow_context *context, pgoff_t pgoff,
+		   unsigned long nr_pages, long new_offset, gfp_t gfp)
+{
+	const pgoff_t pgoff_last = pgoff + nr_pages - 1;
+	MA_STATE(mas_remaps, &context->remap_mt, pgoff, pgoff_last);
+
+	/*
+	 * If there is an overlapping entry that extends past the start of the
+	 * range, we need to split LEFT:
+	 *
+	 *  pgoff_first_range  pgoff
+	 *         .             .
+	 *         .<----------->.
+	 *         |-------------|------|
+	 *         |    remap ent|y     |
+	 *         |-------------|------|
+	 *                     split
+	 */
+	if (!is_empty_remaps(get_remaps(&mas_remaps))) {
+		const pgoff_t pgoff_first_range = mas_remaps.index;
+
+		if (pgoff_first_range < pgoff)
+			split_remap(context, pgoff, pgoff_first_range,
+				    new_offset, gfp);
+	}
+
+	/*
+	 * If there is an overlapping entry that extends past the end of the
+	 * range, we need to split RIGHT:
+	 *
+	 *           pgoff_last  pgoff_last_range
+	 *                .             .
+	 *                .<----------->.
+	 *         |------|-------------|
+	 *         |    re|ap entry     |
+	 *         |------|-------------|
+	 *              split
+	 */
+	mas_set(&mas_remaps, pgoff_last);
+	if (!is_empty_remaps(get_remaps(&mas_remaps))) {
+		const pgoff_t pgoff_last_range = mas_remaps.last;
+
+		if (pgoff_last_range > pgoff_last)
+			split_remap(context, pgoff_last, pgoff_last_range,
+				    new_offset, gfp);
+	}
+
+	add_overlapping_remap(&mas_remaps, pgoff, pgoff_last, new_offset);
+}
+
 static struct cow_context *delete_child_from_parent(struct cow_context *context)
 {
 	/*
@@ -449,5 +752,6 @@ void mm_init_cow_context(struct mm_struct *mm)
 	INIT_LIST_HEAD(&context->children);
 	INIT_LIST_HEAD(&context->siblings);
 	spin_lock_init(&context->list_write_lock);
+	spin_lock_init(&context->concurrent_unmap_lock);
 	mm->cow_context = context;
 }

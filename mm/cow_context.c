@@ -838,6 +838,27 @@ void cow_context_vma_unmap(struct vm_area_struct *vma)
 	find_and_unmap_existing(context, pgoff, nr_pages, old_offset);
 }
 
+void cow_context_vma_adjust(struct vm_area_struct *vma, unsigned long start,
+			    unsigned long end)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	struct cow_context *context = mm->cow_context;
+	const pgoff_t pgoff = vma->vm_pgoff;
+	const long offset = (vma->vm_start >> PAGE_SHIFT) - pgoff;
+	const long start_delta = (long)(start - vma->vm_start) >> PAGE_SHIFT;
+	const unsigned long nr_pages = vma_pages(vma);
+	const unsigned long new_nr_pages = (end - start) >> PAGE_SHIFT;
+
+	if (!should_track_remap(vma))
+		return;
+
+	/* First unmap existing. */
+	find_and_unmap_existing(context, pgoff, nr_pages, offset);
+	/* Then add in the newly adjusted entry. */
+	add_new_remap(context, pgoff + start_delta, new_nr_pages,
+		      offset, GFP_KERNEL);
+}
+
 /* vma is _after_ the remap. */
 static void __cow_context_do_remap(struct vm_area_struct *vma, long pgoff_orig,
 				   bool is_remap)

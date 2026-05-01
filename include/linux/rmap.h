@@ -990,6 +990,12 @@ void cow_context_do_fork(struct vm_area_struct *vma, struct vm_area_struct *pvma
 void cow_context_do_remap(struct vm_area_struct *vma, unsigned long orig_addr);
 void cow_context_do_map_private_cow(struct vm_area_struct *vma);
 void cow_context_walk(struct folio *folio, struct rmap_walk_control *rwc);
+/*
+ * VMA _before_ adjustment. Fields after. TODO: Remove, we don't need to track
+ * splits/merges.
+ */
+void cow_context_vma_adjust(struct vm_area_struct *vma, unsigned long start,
+			    unsigned long end);
 
 #else	/* !CONFIG_MMU */
 

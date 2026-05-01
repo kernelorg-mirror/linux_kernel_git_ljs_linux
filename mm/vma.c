@@ -501,6 +501,7 @@ static __must_check int
 __split_vma(struct vma_iterator *vmi, struct vm_area_struct *vma,
 	    unsigned long addr, int new_below)
 {
+	const unsigned long orig_addr = vma->vm_start;
 	struct vma_prepare vp;
 	struct vm_area_struct *new;
 	int err;
@@ -560,11 +561,19 @@ __split_vma(struct vma_iterator *vmi, struct vm_area_struct *vma,
 		hugetlb_split(vma, addr);
 
 	if (new_below) {
+		const unsigned long delta = (addr - new->vm_start) >> PAGE_SHIFT;
+		const pgoff_t pgoff_new = vma->vm_pgoff + delta;
+
+		cow_context_vma_adjust(vma, addr, vma->vm_end);
 		vma->vm_start = addr;
-		vma->vm_pgoff += (addr - new->vm_start) >> PAGE_SHIFT;
+		vma->vm_pgoff = pgoff_new;
 	} else {
+		cow_context_vma_adjust(vma, vma->vm_start, addr);
 		vma->vm_end = addr;
 	}
+
+	/* We duplicate new, then update pgoff, this might still need a remap entry? TODO: Check */
+	cow_context_do_remap(new, orig_addr);
 
 	/* vma_complete stores the new vma */
 	vma_complete(&vp, vmi, vma->vm_mm);
@@ -718,6 +727,7 @@ static void vmg_adjust_set_range(struct vma_merge_struct *vmg)
 		return;
 	}
 
+	cow_context_vma_adjust(adjust, vmg->end, adjust->vm_end);
 	vma_set_range(adjust, vmg->end, adjust->vm_end, pgoff);
 }
 
@@ -762,6 +772,7 @@ static int commit_merge(struct vma_merge_struct *vmg)
 	 */
 	vma_adjust_trans_huge(vma, vmg->start, vmg->end,
 			      vmg->__adjust_middle_start ? vmg->middle : NULL);
+	cow_context_vma_adjust(vma, vmg->start, vmg->end);
 	vma_set_range(vma, vmg->start, vmg->end, vmg->pgoff);
 	vmg_adjust_set_range(vmg);
 	vma_iter_store_overwrite(vmg->vmi, vmg->target);
@@ -1267,6 +1278,7 @@ int vma_shrink(struct vma_iterator *vmi, struct vm_area_struct *vma,
 	vma_adjust_trans_huge(vma, start, end, NULL);
 
 	vma_iter_clear(vmi);
+	cow_context_vma_adjust(vma, start, end);
 	vma_set_range(vma, start, end, pgoff);
 	vma_complete(&vp, vmi, vma->vm_mm);
 	validate_mm(vma->vm_mm);
@@ -1921,6 +1933,7 @@ struct vm_area_struct *copy_vma(struct vm_area_struct **vmap,
 			*vmap = vma = new_vma;
 		}
 		*need_rmap_locks = (new_vma->vm_pgoff <= vma->vm_pgoff);
+		/* Merge will adjust cow context for us. */
 	} else {
 		new_vma = vm_area_dup(vma);
 		if (!new_vma)
@@ -2929,6 +2942,7 @@ int do_brk_flags(struct vma_iterator *vmi, struct vm_area_struct *vma,
 		goto unacct_fail;
 
 	vma_set_anonymous(vma);
+	cow_context_vma_adjust(vma, addr, addr + len);
 	vma_set_range(vma, addr, addr + len, addr >> PAGE_SHIFT);
 	vma->flags = vma_flags;
 	vma->vm_page_prot = vm_get_page_prot(vma_flags_to_legacy(vma_flags));
@@ -3179,6 +3193,10 @@ int expand_upwards(struct vm_area_struct *vma, unsigned long address)
 				if (vma_test(vma, VMA_LOCKED_BIT))
 					mm->locked_vm += grow;
 				vm_stat_account(mm, vma->vm_flags, grow);
+
+				if (vma->anon_vma)
+					cow_context_vma_adjust(vma, vma->vm_start, address);
+
 				anon_vma_interval_tree_pre_update_vma(vma);
 				vma->vm_end = address;
 				/* Overwrite old entry in mtree. */
@@ -3259,6 +3277,10 @@ int expand_downwards(struct vm_area_struct *vma, unsigned long address)
 					mm->locked_vm += grow;
 				vm_stat_account(mm, vma->vm_flags, grow);
 				anon_vma_interval_tree_pre_update_vma(vma);
+
+				if (vma->anon_vma)
+					cow_context_vma_adjust(vma, address, vma->vm_end);
+
 				vma->vm_start = address;
 				vma->vm_pgoff -= grow;
 				/* Overwrite old entry in mtree. */

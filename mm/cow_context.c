@@ -113,6 +113,11 @@ long get_remap(remaps_entry_t remaps, int index);
 void set_multi_remap(remaps_entry_t remaps, int index, long offset);
 void free_remaps(remaps_entry_t remaps);
 
+void store_new_remaps_entry(struct ma_state *mas_remaps, pgoff_t pgoff,
+			    pgoff_t pgoff_last, remaps_entry_t remaps);
+void store_new_simple_remap(struct ma_state *mas_remaps, pgoff_t pgoff,
+			    pgoff_t pgoff_last, long new_offset);
+
 static int __dynarray_nr(struct dynarray *arr)
 {
 	return READ_ONCE(arr->nr);
@@ -359,6 +364,24 @@ void free_remaps(remaps_entry_t remaps)
 		return;
 
 	dynarray_free_rcu(get_multi_remaps(remaps));
+}
+
+void store_new_remaps_entry(struct ma_state *mas_remaps, pgoff_t pgoff,
+			    pgoff_t pgoff_last, remaps_entry_t remaps)
+{
+	mas_set_range(mas_remaps, pgoff, pgoff_last);
+
+	mas_lock(mas_remaps);
+	mas_store_gfp(mas_remaps, remaps.entry, GFP_KERNEL);
+	mas_unlock(mas_remaps);
+}
+
+void store_new_simple_remap(struct ma_state *mas_remaps, pgoff_t pgoff,
+			    pgoff_t pgoff_last, long new_offset)
+{
+	remaps_entry_t remaps = mk_simple_remap(new_offset);
+
+	store_new_remaps_entry(mas_remaps, pgoff, pgoff_last, remaps);
 }
 
 static struct cow_context *delete_child_from_parent(struct cow_context *context)

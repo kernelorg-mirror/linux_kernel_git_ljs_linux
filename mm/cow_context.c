@@ -12,6 +12,12 @@
 #include <linux/rmap.h>
 #include "internal.h"
 
+struct walk_context_control {
+	void *arg;
+	bool (*walk_one)(struct folio *folio, struct vm_area_struct *vma,
+			 unsigned long addr, void *arg);
+};
+
 /* Simple dynamic array. */
 struct dynarray {
 	int nr, cap;
@@ -104,6 +110,9 @@ void dynarray_shrink(struct dynarray *arr);
 
 #define DECLARE_STACK_DYNARRAY_SIMPLE_REMAP(_name, _remap)		\
 	DECLARE_DYNARRAY_SINGLE(_name, get_simple_remap(_remap))
+
+/* How many remaps we keep on the stack before allocating on walk. */
+#define WALK_DEFAULT_STACK_SIZE 16
 
 remaps_entry_t mk_stack_multi_remaps(struct dynarray *stack_multi);
 remaps_entry_t mk_simple_remap(long offset);
@@ -886,4 +895,185 @@ void cow_context_do_map_private_cow(struct vm_area_struct *vma)
 		return;
 
 	add_new_remap(context, pgoff, nr_pages, offset, GFP_KERNEL);
+}
+
+static bool walk_context_remap(struct cow_context *context, struct folio *folio,
+			       struct walk_context_control *wcc, long offset)
+{
+	const unsigned long nr_pages = folio_nr_pages(folio);
+	const pgoff_t pgoff_folio = folio_pgoff(folio);
+	const pgoff_t pgoff_start = pgoff_folio + offset;
+	const pgoff_t pgoff_end = pgoff_start + nr_pages;
+	const unsigned long range_start = pgoff_start << PAGE_SHIFT;
+	const unsigned long range_end = pgoff_end << PAGE_SHIFT;
+	VMA_ITERATOR(vmi, context->mm, range_start);
+	struct vm_area_struct *vma;
+
+	lockdep_assert_in_rcu_read_lock();
+
+	for_each_vma_range(vmi, vma, range_end) {
+		/* TODO: VMA is not stabilised... */
+		const unsigned long start = READ_ONCE(vma->vm_start);
+		const pgoff_t pgoff_vma = READ_ONCE(vma->vm_pgoff);
+		const pgoff_t pgoff_vma_start = start >> PAGE_SHIFT;
+		const long offset_vma = (long)pgoff_vma_start - (long)pgoff_vma;
+
+		if (offset_vma != offset)
+			continue;
+		/*
+		 * TODO: We shouldn't be holding the RCU lock here :) need to
+		 *       change how rmap walks work.
+		 * TODO: VMA not locked so unsafe to access.
+		 */
+		if (!wcc->walk_one(folio, vma,
+				   max(vma->vm_start, range_start), wcc->arg))
+			return false;
+	}
+
+	return true;
+}
+
+static bool walk_context(struct cow_context *context, void *arg1, void *arg2)
+{
+	struct folio *folio = arg1;
+	const pgoff_t pgoff = folio_pgoff(folio);
+	const pgoff_t pgoff_last = pgoff + folio_nr_pages(folio) - 1;
+	DECLARE_DYNARRAY(unique_multi, WALK_DEFAULT_STACK_SIZE);
+	remaps_entry_t unique_remaps = mk_stack_multi_remaps(unique_multi);
+	MA_STATE(mas_remaps, &context->remap_mt, pgoff, pgoff_last);
+	struct mm_struct *mm = READ_ONCE(context->mm);
+	struct walk_context_control *wcc = arg2;
+	remaps_entry_t remaps;
+	bool was_exclusive;
+	long curr_offset;
+	bool ret = true;
+	int i;
+
+	lockdep_assert_in_rcu_read_lock();
+
+	if (!mm)
+		return true;
+	if (!mmget_not_zero(mm))
+		return true;
+
+	/*
+	 * exclusive folios are moved to the correct Cow context level, so we
+	 * only look once.
+	 *
+	 * TODO: Races?
+	 */
+	was_exclusive = !folio_maybe_mapped_shared(folio);
+	/* Try the non-remapped case. */
+	if (!walk_context_remap(context, folio, wcc, 0)) {
+		ret = false;
+		goto out_mmput;
+	}
+	/*
+	 * Check again in case fork raced, therwise, abort the walk we're done.
+	 * TODO: race vs. fork + unmap in parent.
+	 */
+	if (was_exclusive && !folio_maybe_mapped_shared(folio)) {
+		ret = false;
+		goto out_mmput;
+	}
+
+	/* Get unique remaps... TODO: Sketchy GFP_ATOMIC. */
+	remaps_for_each(i, &mas_remaps, remaps, curr_offset, pgoff_last)
+		unique_remaps = append_remap_offset(unique_remaps, curr_offset,
+						    GFP_ATOMIC);
+	/* ...And check each one. */
+	remaps_for_each_entry_offset(i, unique_remaps, curr_offset) {
+		if (!walk_context_remap(context, folio, wcc, curr_offset)) {
+			ret = false;
+			break;
+		}
+	}
+
+	/* In case we had so many we had to allocate. */
+	free_remaps(unique_remaps);
+out_mmput:
+	mmput_async(mm);
+	return ret;
+}
+
+typedef bool (traverse_fn_t)(struct cow_context *, void *, void *);
+
+static void traverse_contexts(struct cow_context *root, traverse_fn_t *callback,
+			      void *arg1, void *arg2)
+{
+	struct cow_context *parent = NULL;
+	struct cow_context *curr = root;
+	struct cow_context *next = NULL;
+
+	lockdep_assert_in_rcu_read_lock();
+
+	/* Visit root first. */
+	if (!callback(root, arg1, arg2))
+		return;
+
+	/*
+	 * Depth-first traversal:
+	 *
+	 *          ..... 7......
+	 *         .      v      .
+	 *        . ------*------ .
+	 *       . /             \ .
+	 *      . *<3............ *<6
+	 *     . / \ .         . / \ .
+	 *    . *   * .       . *   * .
+	 *   .  ^   ^  .     .  ^   ^  .
+	 *  ....1...2....   ....4...5....
+	 *
+	 * Loop steps:
+	 *
+	 * 1. If not just moved to parent, try to descend to left-most child of
+	 *    current node.
+	 * 2. Visit current node. If it is the root node, abort.
+	 * 3. Try to traverse to next sibling. If cannot, traverse parent.
+	 */
+	for (; ; curr = next) {
+		if (curr != parent) {
+			next = list_first_or_null_rcu(&curr->children,
+					struct cow_context, siblings);
+			if (next)
+				continue;
+		}
+
+		if (curr == root || !callback(curr, arg1, arg2))
+			break;
+
+		parent = curr->parent;
+		next = list_next_or_null_rcu(&parent->children,
+					     &curr->siblings, struct cow_context,
+					     siblings) ?: parent;
+	}
+}
+
+static bool rwc_walk_one(struct folio *folio, struct vm_area_struct *vma,
+			 unsigned long addr, void *arg)
+{
+	struct rmap_walk_control *rwc = arg;
+
+	if (!vma)
+		return true;
+	if (rwc->invalid_vma && rwc->invalid_vma(vma, rwc->arg))
+		return true;
+	if (!rwc->rmap_one(folio, vma, addr, rwc->arg))
+		return false;
+	if (rwc->done && rwc->done(folio))
+		return false;
+
+	return true;
+}
+
+void cow_context_walk(struct folio *folio, struct rmap_walk_control *rwc)
+{
+	struct walk_context_control wcc = {
+		.walk_one = rwc_walk_one,
+		.arg = rwc,
+	};
+
+	rcu_read_lock();
+	traverse_contexts(folio->cow_context, walk_context, folio, &wcc);
+	rcu_read_unlock();
 }

@@ -18,6 +18,20 @@ struct dynarray {
 	void *contents[] __counted_by(cap);
 };
 
+/*
+ * Represents different types of remap entry:
+ *
+ *  Simple (1 entry)             - val << 2 | 1, maybe (1<<1)
+ * Complex (N entries)           - struct multi_remaps *
+ * Complex (N entries), on stack - struct multi_remaps * | (1<<1)
+ */
+typedef union {
+	struct dynarray *multi;
+	unsigned long raw;
+	long offset;
+	void *entry;
+} remaps_entry_t;
+
 /* Dynamic array API. */
 
 struct dynarray *dynarray_dup(struct dynarray *arr, gfp_t gfp);
@@ -64,6 +78,40 @@ void dynarray_shrink_rcu(struct dynarray *arr);
 	do {							\
 		WRITE_ONCE(_arr->contents[_idx], (void *)_val);	\
 	} while (0)
+
+/* Remaps API. */
+
+#define remaps_for_each_entry(_mas_remaps, _remaps, _pgoff_last)	\
+	lockdep_assert_in_rcu_read_lock();				\
+	mas_for_each(_mas_remaps, (_remaps).entry, _pgoff_last)
+
+#define remaps_for_each_entry_offset(_idx, _remaps, _curr_offset)	\
+	for (_idx = 0;							\
+	     _idx < nr_remaps(_remaps) &&				\
+		     ((_curr_offset = get_remap(_remaps, _idx)), 1);	\
+	     _idx++)
+
+#define remaps_for_each(_idx, _mas_remaps, _remaps, _curr_offset, _pgoff_last)	\
+	remaps_for_each_entry(_mas_remaps, _remaps, _pgoff_last)		\
+		remaps_for_each_entry_offset(_idx, _remaps, _curr_offset)
+
+#define REMAP_IS_SIMPLE   (1UL)
+#define REMAP_IS_ON_STACK (1UL << 1)
+#define REMAP_ENTRY_MASK (REMAP_IS_SIMPLE | REMAP_IS_ON_STACK)
+#define REMAP_SIMPLE_SHIFT 2
+
+#define EMPTY_REMAPS_ENTRY ((remaps_entry_t)NULL)
+
+#define DECLARE_STACK_DYNARRAY_SIMPLE_REMAP(_name, _remap)		\
+	DECLARE_DYNARRAY_SINGLE(_name, get_simple_remap(_remap))
+
+remaps_entry_t mk_stack_multi_remaps(struct dynarray *stack_multi);
+remaps_entry_t mk_simple_remap(long offset);
+bool same_remaps(remaps_entry_t a, remaps_entry_t b);
+int nr_remaps(remaps_entry_t remaps);
+long get_remap(remaps_entry_t remaps, int index);
+void set_multi_remap(remaps_entry_t remaps, int index, long offset);
+void free_remaps(remaps_entry_t remaps);
 
 static int __dynarray_nr(struct dynarray *arr)
 {
@@ -216,6 +264,101 @@ void dynarray_shrink_rcu(struct dynarray *arr)
 		dynarray_set_nr(arr, 0);
 		dynarray_free_rcu(arr);
 	}
+}
+
+remaps_entry_t mk_stack_multi_remaps(struct dynarray *stack_multi)
+{
+	remaps_entry_t ret = {
+		.multi = stack_multi,
+	};
+
+	ret.raw |= REMAP_IS_ON_STACK;
+	return ret;
+}
+
+static bool is_simple_remap_entry(remaps_entry_t remaps)
+{
+	return remaps.raw & REMAP_IS_SIMPLE;
+}
+
+static bool is_remap_entry_on_stack(remaps_entry_t remaps)
+{
+	return remaps.raw & REMAP_IS_ON_STACK;
+}
+
+static long get_simple_remap(remaps_entry_t remaps)
+{
+	/* Signedness retained. */
+	return remaps.offset >> REMAP_SIMPLE_SHIFT;
+}
+
+static struct dynarray *get_multi_remaps(remaps_entry_t remaps)
+{
+	remaps_entry_t copy = remaps;
+
+	copy.raw &= ~REMAP_ENTRY_MASK;
+	return copy.multi;
+}
+
+remaps_entry_t mk_simple_remap(long offset)
+{
+	remaps_entry_t ret = { .offset = offset << REMAP_SIMPLE_SHIFT };
+
+	ret.raw |= REMAP_IS_SIMPLE;
+	return ret;
+}
+
+bool same_remaps(remaps_entry_t a, remaps_entry_t b)
+{
+	return a.raw == b.raw;
+}
+
+static bool is_empty_remaps(remaps_entry_t remaps)
+{
+	remaps_entry_t copy = remaps;
+
+	copy.raw &= ~REMAP_ENTRY_MASK;
+	return !copy.raw;
+}
+
+int nr_remaps(remaps_entry_t remaps)
+{
+	if (is_empty_remaps(remaps))
+		return 0;
+	if (is_simple_remap_entry(remaps))
+		return 1;
+	return dynarray_nr(get_multi_remaps(remaps));
+}
+
+long get_remap(remaps_entry_t remaps, int index)
+{
+	struct dynarray *arr;
+
+	if (is_simple_remap_entry(remaps))
+		return get_simple_remap(remaps);
+
+	arr = get_multi_remaps(remaps);
+	return __dynarray_get_t(long, index, arr);
+}
+
+void set_multi_remap(remaps_entry_t remaps, int index,
+		     long offset)
+{
+	struct dynarray *arr = get_multi_remaps(remaps);
+
+	__dynarray_set(index, arr, offset);
+}
+
+void free_remaps(remaps_entry_t remaps)
+{
+	if (is_empty_remaps(remaps))
+		return;
+	if (is_simple_remap_entry(remaps))
+		return;
+	if (is_remap_entry_on_stack(remaps))
+		return;
+
+	dynarray_free_rcu(get_multi_remaps(remaps));
 }
 
 static struct cow_context *delete_child_from_parent(struct cow_context *context)

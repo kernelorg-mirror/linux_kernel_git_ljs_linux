@@ -868,4 +868,22 @@ void cow_context_do_remap(struct vm_area_struct *vma, unsigned long orig_addr)
 void cow_context_do_fork(struct vm_area_struct *vma, struct vm_area_struct *pvma)
 {
 	__cow_context_do_remap(vma, vma->vm_start >> PAGE_SHIFT, /*is_remap=*/false);
+	/* Parent MAP_PRIVATE-file backed mappings need to be duplicated too. */
+	cow_context_do_map_private_cow(pvma);
+}
+
+void cow_context_do_map_private_cow(struct vm_area_struct *vma)
+{
+	const pgoff_t pgoff_moved = vma->vm_start >> PAGE_SHIFT;
+	const unsigned long nr_pages = vma_pages(vma);
+	const pgoff_t pgoff = vma->vm_pgoff;
+	const long offset = pgoff_moved - pgoff;
+	struct mm_struct *mm = vma->vm_mm;
+	struct cow_context *context = mm->cow_context;
+
+	mmap_assert_locked(mm);
+	if (!should_track_map_private_remap(vma))
+		return;
+
+	add_new_remap(context, pgoff, nr_pages, offset, GFP_KERNEL);
 }

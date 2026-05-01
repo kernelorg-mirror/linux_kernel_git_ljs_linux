@@ -988,6 +988,7 @@ void dup_cow_context(struct mm_struct *mm, struct mm_struct *oldmm);
 void cow_context_vma_unmap(struct vm_area_struct *vma);
 void cow_context_do_fork(struct vm_area_struct *vma, struct vm_area_struct *pvma);
 void cow_context_do_remap(struct vm_area_struct *vma, unsigned long orig_addr);
+void cow_context_do_map_private_cow(struct vm_area_struct *vma);
 
 #else	/* !CONFIG_MMU */
 
